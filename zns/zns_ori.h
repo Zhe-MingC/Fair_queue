@@ -50,16 +50,7 @@ typedef struct zns_ssd_plane {
     bool *is_reg_busy;
     bool busy;
 }zns_ssd_plane;
-/**
- * @brief
- * 为了模拟request分发到chip上的事务，一个事务仅属于一个请求
- * TODO: 不够完善
-*/
-typedef struct chip_transaction{
-    NvmeRequest *req; //指向对应req的指针
-    struct zns_ssd_channel *ch; //指向对应的channel
-    struct zns_ssd_lun *chip; //指向对应的chip
-}chip_transaction;
+
 /**
  * @brief 
  * inhoinno: to implement Multi way in ZNS, ssd_chip structure is required.
@@ -69,7 +60,6 @@ typedef struct chip_transaction{
  */
 typedef struct zns_ssd_lun {
     uint64_t next_avail_time; // in nanoseconds
-    QTAILQ_ENTRY(chip_list, chip_transaction) chip_list; //chip_list保存当前chip上执行的事务
     pthread_spinlock_t time_lock;
     bool busy;
 }zns_ssd_lun;

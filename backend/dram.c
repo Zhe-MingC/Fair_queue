@@ -18,7 +18,6 @@ int init_dram_backend(SsdDramBackend **mbe, int64_t nbytes)
     return 0;
 }
 
-void test() {}
 
 void free_dram_backend(SsdDramBackend *b)
 {
