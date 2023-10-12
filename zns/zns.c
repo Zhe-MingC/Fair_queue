@@ -1329,12 +1329,12 @@ static uint64_t znsssd_write(ZNS *zns, NvmeRequest *req){
     uint64_t nand_stime =0;
     uint64_t cmd_stime = 0;
     zns_ssd_channel *chnl =NULL;
-    zns_ssd_plane *plane = NULL;
-    uint32_t my_plane_idx = 0;
+    // zns_ssd_plane *plane = NULL;
+    // uint32_t my_plane_idx = 0;
     uint32_t my_chnl_idx = 0;
-    //zns_ssd_lun *chip = NULL;
-    //uint32_t my_chip_idx = 0;
-
+    zns_ssd_lun *chip = NULL;
+    uint32_t my_chip_idx = 0;
+    chip_transaction *c_t;
 
     uint64_t chnl_stime =0;
     if (req->stime == 0) {
@@ -1349,70 +1349,44 @@ static uint64_t znsssd_write(ZNS *zns, NvmeRequest *req){
     // 32  = 16K  
     // 8   = 
     // 每次写512的数据
-    for (uint64_t i = 0; i<nlb ; i+=(ZNS_PAGE_SIZE / 512)){
-        
+    for (uint64_t i = 0; i < nlb ; i += (ZNS_PAGE_SIZE / 512)){
         slba += i;
-        //femu_err("[TEST] zns.c:1295 i:%lu slba:%lu nlb:%u ppa:%lu chidx%lu chnnl:%lu \n",
-        //i, slba, nlb,zns_get_multiway_ppn_idx(req->ns,slba), zns_get_multiway_chip_idx(req->ns,slba), 
-        //zns_advanced_chnl_idx(req->ns,slba));
-        /*
-        #if SK_HYNIX_VALIDATION
-                my_chip_idx=hynix_zns_get_lun_idx(ns,slba); //SK Hynix
-        #endif
-        #if !(SK_HYNIX_VALIDATION)
-                my_chip_idx=zns_get_multiway_chip_idx(ns, slba); 
-        #endif
-                chip = &(zns->chips[my_chip_idx]);
-        #if !(ADVANCE_PER_CH_ENDTIME)
-                //Inhoinno:  Single thread emulation so assume we dont need lock per chnl
-                nand_stime = (chip->next_avail_time < cmd_stime) ? cmd_stime : \
-                            chip->next_avail_time;
-                chip->next_avail_time = nand_stime + spp->pg_wr_lat;
-                currlat= chip->next_avail_time - cmd_stime ; //Inhoinno : = T_channel + T_chip(=chnl->next_available_time) - stime; // FIXME like this 
-                maxlat = (maxlat < currlat)? currlat : maxlat;
-        #endif
-        */
-#if ADVANCE_PER_CH_ENDTIME
-#if SK_HYNIX_VALIDATION
-        my_chnl_idx = hynix_zns_get_chnl_idx(ns, slba); //SK Hynix
-#endif
-#if !(SK_HYNIX_VALIDATION)
-        // 
+        
+        
+        
         my_chnl_idx=zns_advanced_chnl_idx(ns, slba);  //根据slba得到channel的id
-#endif
-        my_plane_idx=zns_advanced_plane_idx(ns, slba); 
+        my_chip_idx=zns_get_multiway_chip_idx(ns, slba); 
         chnl = &(zns->ch[my_chnl_idx]);
-        plane= &(zns->planes[my_plane_idx]);
-        //pthread_spin_lock(&(chnl->time_lock));
+        chip = &(zns->chips[my_chip_idx]);
+
         // if(chnl->next_ch_avail_time >= cmd_stime){
         //     femu_log("channel queue accumulate\n\r");
         // }
-        chnl_stime = (chnl->next_ch_avail_time < cmd_stime) ? cmd_stime : \
-                     chnl->next_ch_avail_time;
-        chnl->next_ch_avail_time = chnl_stime + spp->ch_xfer_lat;
-        //pthread_spin_unlock(&(chnl->time_lock));
+
+        //给该req拆分出的transaction分配空间以及赋值
+        c_t = g_malloc0(sizeof(chip_transaction)); //给chip上的transaction分配内存
+        assert(c_t == NULL);
+        c_t->req = req;
+        c_t->ch = chnl;
+        c_t->chip = chip;
+        // entry 只是一个占位符，在每次循环迭代中，并没有在内存中分配存储空间。
+        QTAILQ_INSERT_TAIL(chip_list, c_t, entry);// 将对应的transaction插入对应的chip队列中
+
+
         #ifdef RESOURCE_UTIL_LOG 
         femu_log("chnl [%u] status busy [%lu] from %lu to %lu [sqid %u] write\n\r", my_chnl_idx, qemu_clock_get_ns(QEMU_CLOCK_REALTIME), chnl_stime, chnl->next_ch_avail_time, req->sq->sqid);
         #endif
 
-        //write: then do NAND program
-        //pthread_spin_lock(&(chip->time_lock)); 
 
-        nand_stime = (plane->next_avail_time < chnl->next_ch_avail_time) ? \
-            chnl->next_ch_avail_time : plane->next_avail_time;
-        plane->next_avail_time = nand_stime + spp->pg_wr_lat;
-        currlat = plane->next_avail_time - cmd_stime;
+      
         
-        if(plane->next_avail_time >= cmd_stime){
-            femu_debug("plane queue accumulate\n\r");
-        }
-        //pthread_spin_unlock(&(chip->time_lock));
+        // if(plane->next_avail_time >= cmd_stime){
+        //     femu_debug("plane queue accumulate\n\r");
+        // }
         #ifdef RESOURCE_UTIL_LOG 
         femu_log("plane [%u] status busy [%lu] from %lu to %lu [sqid %u] write\n\r", my_plane_idx, qemu_clock_get_ns(QEMU_CLOCK_REALTIME), nand_stime, plane->next_avail_time, req->sq->sqid );
         #endif
-        maxlat = (maxlat < currlat)? currlat : maxlat;
-#endif
-    //femu_err("PROFILING znsssd_write %lu\n", (req->expire_time -req->stime));
+        // maxlat = (maxlat < currlat)? currlat : maxlat;
 
     }
     return maxlat;
@@ -1551,6 +1525,7 @@ static uint64_t znssd_reset_zones(ZNS *zns, NvmeRequest *req){
     }
     return maxlat;
 }
+
 static int zns_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req){
     
     NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
@@ -1627,32 +1602,13 @@ static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         }
     }
     // femu_err("read success?? slba %lu\n\r",slba);
+    // req_distribute(n, ns, cmd, req);
+    // process_die_queue(n, ns, cmd, req);
     data_offset = zns_l2b(ns, slba);
     req->expire_time += zns_advance_status(n,ns,cmd,req);
     /*PCI latency model here*/
 
-#if PCIe_TIME_SIMULATION
-    //lock
-    //pthread_spin_lock(&n->pci_lock);
-    if(pcie->ntime + 2000 <  req->stime ){
-        lag=0;
-        pcie->stime = req->stime;
-        pcie->ntime = pcie->stime + Interface_PCIeGen3x4_bwmb/NVME_DEFAULT_MAX_AZ_SIZE/1000 * delta_time;
-        req->expire_time += 968*(req->nlb/8);
-    }else if(pcie->ntime < (pcie->stime + delta_time)){
-        //update lag
-        lag = (pcie->ntime - req->stime);
-        pcie->stime = pcie->ntime;
-        pcie->ntime = pcie->stime + Interface_PCIeGen3x4_bwmb/NVME_DEFAULT_MAX_AZ_SIZE/1000 * delta_time; //1ms
-        req->expire_time += lag;
-        pcie->stime += delta_time;
-    }else if (req->stime < pcie->ntime && lag != 0 ){
-        req->expire_time+=lag;
-    }
-    pcie->stime += delta_time;
-    //femu_err("[inho] lag : %lx\n", lag);
-    //pthread_spin_unlock(&n->pci_lock);
-#endif
+
     //unlock
     backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
     return NVME_SUCCESS;
