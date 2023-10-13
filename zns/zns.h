@@ -60,6 +60,7 @@ typedef struct chip_transaction{
     struct zns_ssd_channel *ch; //指向对应的channel
     struct zns_ssd_lun *chip; //指向对应的chip
     QTAILQ_ENTRY(chip_transaction) entry; //为了使用QTAILQ而
+    uint64_t lat; //记录该transaction的延迟
 }chip_transaction;
 /**
  * @brief 

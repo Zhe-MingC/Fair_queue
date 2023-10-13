@@ -1357,7 +1357,7 @@ static void znsssd_write(ZNS *zns, NvmeRequest *req){
 
         //给该req拆分出的transaction分配空间以及赋值
         c_t = g_malloc0(sizeof(chip_transaction)); //给chip上的transaction分配内存
-        assert(c_t == NULL);
+        assert(c_t != NULL);
         c_t->req = req;
         c_t->ch = chnl;
         c_t->chip = chip;
@@ -1414,7 +1414,7 @@ static void  znsssd_read(ZNS *zns, NvmeRequest *req){
         chip = &(zns->chips[my_chip_idx]);
         
         c_t = g_malloc0(sizeof(chip_transaction));
-        assert(c_t == NULL);
+        assert(c_t != NULL);
         c_t->req = req;
         c_t->ch = chnl;
         c_t->chip = chip;
@@ -1436,54 +1436,59 @@ static void  znsssd_read(ZNS *zns, NvmeRequest *req){
  * @brief 
  * 处理芯片上的transaction队列
 */
-static void chip_queue_test(ZNS *zns){
-    struct zns_ssdparams *spp = &zns->sp;
-    zns_ssd_lun *chip = NULL;
-    chip_transaction *c_t, *next;   
-    
-    for(int i = 0; i < spp->nchnls * spp->ways; ++i){
-        chip = &zns->chips[i];
-        assert(chip == NULL);
-        QTAILQ_FOREACH_SAFE(c_t, &chip->chip_list, entry, next){
-            // c_t指向该事务，
-            QTAILQ_REMOVE(&chip->chip_list, c_t, entry);
-            assert(c_t->req == NULL);
-            c_t->req->transaction_num--; //将req中的num计数-1；表示已经处理了一个事务
-            femu_log("chip[%d] has transaction from req->stime [%lu]\n\r", i, c_t->req->stime);
-        }
-    }
-}
-// static void chip_list_process(ZNS *zns){
+// static void chip_queue_test(ZNS *zns){
 //     struct zns_ssdparams *spp = &zns->sp;
 //     zns_ssd_lun *chip = NULL;
-//     // 轮询每个chip，然后再轮询每个chip上的事务；
-//     chip_transaction *c_t, *next;
+//     chip_transaction *c_t, *next;   
     
-//     uint64_t cmd_time, nand_time; //判断req起始时间
-    
-    
-//     for(int i = 0; i < spp->nchips * spp->nchnls; ++i){
-//         chip = zns->chips[i];
-//         assert(chip == NULL);
+//     for(int i = 0; i < spp->nchnls * spp->ways; ++i){
+//         chip = &zns->chips[i];
+//         assert(chip != NULL);
 //         QTAILQ_FOREACH_SAFE(c_t, &chip->chip_list, entry, next){
 //             // c_t指向该事务，
 //             QTAILQ_REMOVE(&chip->chip_list, c_t, entry);
-//             assert(c_t->req == NULL);
+//             assert(c_t->req != NULL);
 //             c_t->req->transaction_num--; //将req中的num计数-1；表示已经处理了一个事务
-//             if (req->stime == 0) {
-//                 cmd_stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-//             }else{
-//                 cmd_stime = req->stime;
-//             }
-//             if(c_t->req->is_write){
-//                 chip->next_avail_time = 
-//             }else{
-//                 chip->next_avail_time = 
-//             }
-             
+//             femu_log("chip[%d] has transaction from req->stime [%lu]\n\r", i, c_t->req->stime);
 //         }
 //     }
 // }
+static void chip_list_process(ZNS *zns){
+    struct zns_ssdparams *spp = &zns->sp;
+    zns_ssd_lun *chip = NULL;
+    // 轮询每个chip，然后再轮询每个chip上的事务；
+    chip_transaction *c_t, *next;
+    uint64_t cmd_stime; //判断req起始时间
+    uint64_t chip_time;
+    for(int i = 0; i < spp->nchnls * spp->ways; ++i){
+        chip = &zns->chips[i];
+        assert(chip != NULL);
+        QTAILQ_FOREACH_SAFE(c_t, &chip->chip_list, entry, next){
+            // c_t指向该事务，
+            QTAILQ_REMOVE(&chip->chip_list, c_t, entry);
+            assert(c_t->req != NULL);
+            c_t->req->transaction_num--; //将req中的num计数-1；表示已经处理了一个事务
+            if (c_t->req->stime == 0) { //
+                cmd_stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+            }else{
+                cmd_stime = c_t->req->stime;
+            }
+            if(c_t->req->is_write){
+                chip_time = (chip->next_avail_time < cmd_stime) ? cmd_stime : chip->next_avail_time;
+                chip->next_avail_time = chip_time + spp->pg_wr_lat;
+            }else{
+                chip_time = (chip->next_avail_time < cmd_stime) ? cmd_stime : chip->next_avail_time;
+                chip->next_avail_time = chip_time + spp->pg_rd_lat;
+            }
+            c_t->lat = chip->next_avail_time - cmd_stime;
+            c_t->req->maxlat = c_t->req->maxlat > c_t->lat ? c_t->req->maxlat : c_t->lat; //记录最大延迟
+            if(c_t->req->transaction_num == 0)  //如果所有事务都执行完，记录当前的响应时间
+                c_t->req->expire_time += c_t->req->maxlat;
+            if(c_t->req->transaction_num == 0)
+            femu_log("chip[%d] has transaction from req->stime [%lu] expire_time [%lu]\n\r", i, c_t->req->stime, c_t->req->expire_time);
+        }
+    }
+}
 /**
  * @brief 
  * 
@@ -1559,7 +1564,8 @@ static void zns_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, Nvm
     }else{
         znsssd_read(n->zns, req);
     }
-    chip_queue_test(n->zns);
+    // chip_queue_test(n->zns);
+    chip_list_process(n->zns);
 }
 
 static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
