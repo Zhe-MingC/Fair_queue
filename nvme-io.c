@@ -420,6 +420,7 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     req->slba = slba;
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
+    req->transaction_num = 0; //为了在后续计算该req的所有transaction是否完成来做准备
 
     ret = backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
     if (!ret) {

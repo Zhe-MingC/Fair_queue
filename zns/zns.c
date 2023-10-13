@@ -1018,7 +1018,8 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
         *resets = 1;
         // 先进行状态转换、再进行时延模拟
         status = zns_do_zone_op(ns, zone, proc_mask, zns_reset_zone, req);
-        req->expire_time += zns_advance_status(n, ns, cmd, req);
+        // req->expire_time += zns_advance_status(n, ns, cmd, req);
+        zns_advance_status(n, ns, cmd, req);
         (*resets)--;
         // femu_err("zone reset    action:%c   slba:%ld     zone_idx:%d    req->expire_time(%lu) - req->stime(%lu):%lu\n",action, req->slba ,zone_idx,req->expire_time,req->stime,(req->expire_time - req->stime));
         return NVME_SUCCESS;
@@ -1281,7 +1282,8 @@ static uint16_t zns_do_write(FemuCtrl *n, NvmeRequest *req, bool append,
             goto err;
         }
         
-        req->expire_time += zns_advance_status(n,ns,&req->cmd,req);
+        // req->expire_time += zns_advance_status(n,ns,&req->cmd,req);
+        zns_advance_status(n,ns,&req->cmd,req);
         backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
     }
     zns_finalize_zoned_write(ns, req, false);
@@ -1315,19 +1317,16 @@ static uint16_t zns_check_dulbe(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
     return NVME_SUCCESS;
 }
 // 进行write命令
-static uint64_t znsssd_write(ZNS *zns, NvmeRequest *req){
+static void znsssd_write(ZNS *zns, NvmeRequest *req){
     //FEMU only supports 1 namespace for now (see femu.c:365)
     //and FEMU ZNS Extension use a single thread which mean lockless operations(ch->available_time += ~~) if thread increased
     
     NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
     struct NvmeNamespace *ns = req->ns;
-    struct zns_ssdparams * spp = &zns->sp; 
+    // struct zns_ssdparams * spp = &zns->sp; 
     uint64_t slba = le64_to_cpu(rw->slba);
     uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
-    uint64_t currlat = 0, maxlat= 0;
 
-    uint64_t nand_stime =0;
-    uint64_t cmd_stime = 0;
     zns_ssd_channel *chnl =NULL;
     // zns_ssd_plane *plane = NULL;
     // uint32_t my_plane_idx = 0;
@@ -1335,13 +1334,6 @@ static uint64_t znsssd_write(ZNS *zns, NvmeRequest *req){
     zns_ssd_lun *chip = NULL;
     uint32_t my_chip_idx = 0;
     chip_transaction *c_t;
-
-    uint64_t chnl_stime =0;
-    if (req->stime == 0) {
-        cmd_stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    }else{
-        cmd_stime = req->stime;
-    }
 
     //femu_err("PROFILING znsssd_write %lu\n", (req->expire_time -req->stime));
     // 384 = 192K 450us 65us
@@ -1369,17 +1361,16 @@ static uint64_t znsssd_write(ZNS *zns, NvmeRequest *req){
         c_t->req = req;
         c_t->ch = chnl;
         c_t->chip = chip;
+        c_t->req->transaction_num++;
         // entry 只是一个占位符，在每次循环迭代中，并没有在内存中分配存储空间。
-        QTAILQ_INSERT_TAIL(chip_list, c_t, entry);// 将对应的transaction插入对应的chip队列中
-
+        QTAILQ_INSERT_TAIL(&chip->chip_list, c_t, entry);// 将对应的transaction插入对应的chip队列中
+        
 
         #ifdef RESOURCE_UTIL_LOG 
         femu_log("chnl [%u] status busy [%lu] from %lu to %lu [sqid %u] write\n\r", my_chnl_idx, qemu_clock_get_ns(QEMU_CLOCK_REALTIME), chnl_stime, chnl->next_ch_avail_time, req->sq->sqid);
         #endif
 
-
-      
-        
+        // change_test 
         // if(plane->next_avail_time >= cmd_stime){
         //     femu_debug("plane queue accumulate\n\r");
         // }
@@ -1389,90 +1380,110 @@ static uint64_t znsssd_write(ZNS *zns, NvmeRequest *req){
         // maxlat = (maxlat < currlat)? currlat : maxlat;
 
     }
-    return maxlat;
+    // return maxlat;
 
 }
 /*
-    znsssd_read是为了时延模拟
+    znsssd_read是为了时延模拟,现在无论znsssd_read还是znsssd_write都是将对应事务放到对应芯片队列中
 */
-static uint64_t  znsssd_read(ZNS *zns, NvmeRequest *req){
-    // FEMU only supports 1 namespace for now (see femu.c:365) 
-    // and FEMU ZNS Extension use a single thread which mean lockless operations(ch->available_time += ~~) if thread increased 
-
+static void  znsssd_read(ZNS *zns, NvmeRequest *req){
+ 
     NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
     uint64_t slba = le64_to_cpu(rw->slba);
     uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
     struct NvmeNamespace *ns = req->ns;
-    struct zns_ssdparams * spp = &zns->sp; 
-    //zns_ssd_lun *chip = NULL;
-    zns_ssd_plane *plane = NULL;
-    uint64_t currlat = 0, maxlat= 0;
-    //uint32_t my_chip_idx = 0;
-    uint32_t my_plane_idx = 0;
-    uint64_t nand_stime =0;
-    uint64_t cmd_stime = (req->stime == 0) ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : req->stime ;
+    zns_ssd_lun *chip = NULL;
+    // zns_ssd_plane *plane = NULL;
+    uint32_t my_chip_idx = 0;
+    // uint32_t my_plane_idx = 0;
     zns_ssd_channel *chnl =NULL;
     uint32_t my_chnl_idx = 0;
-    uint64_t chnl_stime =0;
+ 
+    chip_transaction *c_t;
     //uint64_t zidx= zns_zone_idx(ns, slba);
     //uint64_t slpa = (slba >> 3) / (ZNS_PAGE_SIZE/MIN_DISCARD_GRANULARITY);
     // 8:4K 32:16K 64:32K 128:64K
     for (uint64_t i = 0; i<nlb ; i+=(ZNS_PAGE_SIZE / 512)){
         slba += i;
 
-        //my_chip_idx=zns_get_multiway_chip_idx(ns, slba);  
+        my_chip_idx=zns_get_multiway_chip_idx(ns, slba);  
         my_chnl_idx=zns_advanced_chnl_idx(ns, slba); 
-        my_plane_idx=zns_advanced_plane_idx(ns, slba);
+        // my_plane_idx=zns_advanced_plane_idx(ns, slba);
         //chip = &(zns->chips[my_chip_idx]);
         chnl = &(zns->ch[my_chnl_idx]);
-        plane= &(zns->planes[my_plane_idx]);
-
-        //Inhoinno:  Single thread emulation so assume we dont need lock per chnl
+        chip = &(zns->chips[my_chip_idx]);
         
-        
-        //pthread_spin_lock(&(chip->time_lock));
-
-        //GET PLANE AVAILABLE TIME
-        nand_stime = (plane->next_avail_time < cmd_stime) ? cmd_stime : \
-                     plane->next_avail_time;
-
-        //pthread_spin_unlock(&(chip->time_lock));
-        //NAND READ OPERATION HERE
-        //pthread_spin_lock(&(chip->time_lock));
-        
-        plane->next_avail_time = nand_stime + spp->pg_rd_lat;
-        //pthread_spin_unlock(&(chip->time_lock));
-        //
-
-        //read: then data transfer through channel
-        //pthread_spin_lock(&(chnl->time_lock));
-        chnl_stime = (chnl->next_ch_avail_time < plane->next_avail_time) ? \
-            plane->next_avail_time : chnl->next_ch_avail_time;
-        chnl->next_ch_avail_time = chnl_stime + spp->ch_xfer_lat;
-        //IF REGISTER IS AVAIL THEN = 
-        //ELSE REGISTER IS FULL THEN PLANE NEXT AVAIL TIME = chnl->next_ch_avail_time
-        //pthread_spin_unlock(&(chnl->time_lock));
-
-        //if register full in plane i 
-        //      then plane->next_avail_time = chnl->next_ch_avail_time
-        //      
-        //else if register is not full 
-
+        c_t = g_malloc0(sizeof(chip_transaction));
+        assert(c_t == NULL);
+        c_t->req = req;
+        c_t->ch = chnl;
+        c_t->chip = chip;
+        c_t->req->transaction_num++;
+        QTAILQ_INSERT_TAIL(&chip->chip_list, c_t, entry);
         //femu_log("chnl %u status busy [%lu] from %lu to %lu ", my_chnl_idx, qemu_clock_get_ns(QEMU_CLOCK_REALTIME),chnl_stime, chnl->next_ch_avail_time);
         //femu_log("chip [%u] status busy from %lu to %lu (r)\n", my_chip_idx, nand_stime,chip->next_avail_time );
         #ifdef RESOURCE_UTIL_LOG 
         femu_log("chnl [%u] status busy [%lu] from %lu to %lu [sqid %u] read\n\r", my_chnl_idx, qemu_clock_get_ns(QEMU_CLOCK_REALTIME), chnl_stime, chnl->next_ch_avail_time, req->sq->sqid);
         femu_log("plane [%u] status busy [%lu] from %lu to %lu [sqid %u] read\n\r", my_plane_idx, qemu_clock_get_ns(QEMU_CLOCK_REALTIME), nand_stime, plane->next_avail_time,req->sq->sqid );
         #endif
-        currlat = chnl->next_ch_avail_time - cmd_stime;
-        maxlat = (maxlat < currlat)? currlat : maxlat;
-        //femu_log("ztrace %lu zidx %lu slpa %lu cidx %u \n", qemu_clock_get_ns(QEMU_CLOCK_REALTIME), zidx, slpa, my_chip_idx);
-
+        // currlat = chnl->next_ch_avail_time - cmd_stime;
+        // maxlat = (maxlat < currlat)? currlat : maxlat;
     }
 
-    return maxlat;
+    // return maxlat;
 }
-
+/**
+ * @brief 
+ * 处理芯片上的transaction队列
+*/
+static void chip_queue_test(ZNS *zns){
+    struct zns_ssdparams *spp = &zns->sp;
+    zns_ssd_lun *chip = NULL;
+    chip_transaction *c_t, *next;   
+    
+    for(int i = 0; i < spp->nchnls * spp->ways; ++i){
+        chip = &zns->chips[i];
+        assert(chip == NULL);
+        QTAILQ_FOREACH_SAFE(c_t, &chip->chip_list, entry, next){
+            // c_t指向该事务，
+            QTAILQ_REMOVE(&chip->chip_list, c_t, entry);
+            assert(c_t->req == NULL);
+            c_t->req->transaction_num--; //将req中的num计数-1；表示已经处理了一个事务
+            femu_log("chip[%d] has transaction from req->stime [%lu]\n\r", i, c_t->req->stime);
+        }
+    }
+}
+// static void chip_list_process(ZNS *zns){
+//     struct zns_ssdparams *spp = &zns->sp;
+//     zns_ssd_lun *chip = NULL;
+//     // 轮询每个chip，然后再轮询每个chip上的事务；
+//     chip_transaction *c_t, *next;
+    
+//     uint64_t cmd_time, nand_time; //判断req起始时间
+    
+    
+//     for(int i = 0; i < spp->nchips * spp->nchnls; ++i){
+//         chip = zns->chips[i];
+//         assert(chip == NULL);
+//         QTAILQ_FOREACH_SAFE(c_t, &chip->chip_list, entry, next){
+//             // c_t指向该事务，
+//             QTAILQ_REMOVE(&chip->chip_list, c_t, entry);
+//             assert(c_t->req == NULL);
+//             c_t->req->transaction_num--; //将req中的num计数-1；表示已经处理了一个事务
+//             if (req->stime == 0) {
+//                 cmd_stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+//             }else{
+//                 cmd_stime = req->stime;
+//             }
+//             if(c_t->req->is_write){
+//                 chip->next_avail_time = 
+//             }else{
+//                 chip->next_avail_time = 
+//             }
+             
+//         }
+//     }
+// }
 /**
  * @brief 
  * 
@@ -1526,7 +1537,7 @@ static uint64_t znssd_reset_zones(ZNS *zns, NvmeRequest *req){
     return maxlat;
 }
 
-static int zns_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req){
+static void zns_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req){
     
     NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
     uint8_t opcode = rw->opcode;
@@ -1539,13 +1550,16 @@ static int zns_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, Nvme
     if (action == NVME_ZONE_ACTION_RESET){
         //reset zone->wp and zone->status=Empty
         //reset zone, causing every chip lat +
-        return znssd_reset_zones(n->zns,req);
+        znssd_reset_zones(n->zns,req);
     }
     // Read, Write 
     assert(opcode == NVME_CMD_WRITE || opcode == NVME_CMD_READ || opcode == NVME_CMD_ZONE_APPEND);
-    if(req->is_write)
-        return znsssd_write(n->zns, req);
-    return znsssd_read(n->zns, req);
+    if(req->is_write){
+        znsssd_write(n->zns, req);
+    }else{
+        znsssd_read(n->zns, req);
+    }
+    chip_queue_test(n->zns);
 }
 
 static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
@@ -1605,7 +1619,8 @@ static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     // req_distribute(n, ns, cmd, req);
     // process_die_queue(n, ns, cmd, req);
     data_offset = zns_l2b(ns, slba);
-    req->expire_time += zns_advance_status(n,ns,cmd,req);
+    // req->expire_time += zns_advance_status(n,ns,cmd,req);
+    zns_advance_status(n,ns,cmd,req);
     /*PCI latency model here*/
 
 
@@ -1677,7 +1692,8 @@ static uint16_t zns_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
     //sigqueue(156764, SIGRTMIN);
     //femu_err("PROFILING zns_write %lu\n", (req->expire_time -req->stime));
-    req->expire_time += zns_advance_status(n,ns,cmd,req);
+    // req->expire_time += zns_advance_status(n,ns,cmd,req);
+    zns_advance_status(n,ns,cmd,req);
     backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
     zns_finalize_zoned_write(ns, req, false);
     //pthread_spin_unlock(&zone->w_ptr_lock);
@@ -1794,7 +1810,7 @@ static void znsssd_init_params(FemuCtrl * n, struct zns_ssdparams *spp){
     spp->planes_per_die = 4;    //default : 4
     spp->register_model = 1;    
     /*Inho @ Temporarly, FEMU doesn't support more than 1 namespace. Parameters below is for supporting different zone configurations temporarly*/
-
+    // ??? 如何区分chip和ways，它是如何实现并行性的？？？？
     spp->is_another_namespace = false;
     spp->chnls_per_another_zone = 8; //这里是支持别的namespace的
     /* TO REAL STORAGE SIZE */
@@ -1810,6 +1826,7 @@ static void znsssd_init_params(FemuCtrl * n, struct zns_ssdparams *spp){
     femu_log("| block       :       |           :       |\n");
     femu_log("| page        : %ldKiB|           :       |\n",(ZNS_PAGE_SIZE/KiB));
     femu_log("===========================================\n");
+    femu_log("spp->nchips = %lu; spp->ways = %lu", spp->nchips, spp->ways);
 }
 
 /**
@@ -1832,7 +1849,7 @@ static void zns_init_chip(struct zns_ssd_lun *ch, struct zns_ssdparams *spp)
 {
     ch->next_avail_time = 0;
     ch->busy = 0;
-    
+    QTAILQ_INIT(&ch->chip_list);
     int ret = pthread_spin_init(&(ch->time_lock), PTHREAD_PROCESS_SHARED);
     if(ret)
         femu_err("zns.c:1754 znssd_init(): lock alloc failed, to inhoinno \n");
@@ -1871,6 +1888,7 @@ void znsssd_init(FemuCtrl * n){
     }
     for (int i = 0; i < spp->nchnls * spp->ways; i++) {
         zns_init_chip(&zns->chips[i], spp);
+        
     }
     for (uint64_t i=0; i<nplanes; i++){
         zns_init_plane(&zns->planes[i], spp);

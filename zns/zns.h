@@ -59,6 +59,7 @@ typedef struct chip_transaction{
     NvmeRequest *req; //指向对应req的指针
     struct zns_ssd_channel *ch; //指向对应的channel
     struct zns_ssd_lun *chip; //指向对应的chip
+    QTAILQ_ENTRY(chip_transaction) entry; //为了使用QTAILQ而
 }chip_transaction;
 /**
  * @brief 
@@ -69,7 +70,7 @@ typedef struct chip_transaction{
  */
 typedef struct zns_ssd_lun {
     uint64_t next_avail_time; // in nanoseconds
-    QTAILQ_ENTRY(chip_list, chip_transaction) chip_list; //chip_list保存当前chip上执行的事务
+    QTAILQ_HEAD(, chip_transaction) chip_list; //chip_list保存当前chip上执行的事务
     pthread_spinlock_t time_lock;
     bool busy;
 }zns_ssd_lun;
@@ -364,6 +365,6 @@ void zns_ns_cleanup(NvmeNamespace *ns);
 //get_ch(Zone, req)
 
 void znsssd_init(FemuCtrl * n);
-static int zns_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req);
-
+// static int zns_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req);
+static void zns_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req);
 #endif

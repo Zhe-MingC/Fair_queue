@@ -40,7 +40,7 @@
 // #define MK_ZONE_CONVENTIONAL 5
 #define NVME_PRIORITY_SCHED_MODE 1      //future feature for ConfZNS
 
-#define PCIe_TIME_SIMULATION 1
+#define PCIe_TIME_SIMULATION 0
 #define Interface_PCIeGen3x4_bwmb (4034 * MiB) //MB.s
 #define Interface_PCIeGen3x4_bw 4034
 typedef struct _PCIe_Gen3_x4 {
@@ -1042,7 +1042,9 @@ typedef struct NvmeRequest {
     int64_t                 reqlat;
     int64_t                 gcrt;
     int64_t                 expire_time;
-
+    /* 为了记录各个芯片上transaction的完成 */
+    int64_t                 transaction_num; //为了记录
+    int64_t                 maxlat;
     /* OC2.0: sector offset relative to slba where reads become invalid */
     uint64_t predef;
 
