@@ -61,6 +61,7 @@ typedef struct chip_transaction{
     struct zns_ssd_lun *chip; //指向对应的chip
     QTAILQ_ENTRY(chip_transaction) entry; //为了使用QTAILQ而
     uint64_t lat; //记录该transaction的延迟
+    uint64_t estimate_alone_wait_time; //记录该事务预计的单独等待时间
 }chip_transaction;
 /**
  * @brief 

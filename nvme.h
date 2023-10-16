@@ -1045,6 +1045,8 @@ typedef struct NvmeRequest {
     /* 为了记录各个芯片上transaction的完成 */
     int64_t                 transaction_num; //为了记录
     int64_t                 maxlat;
+    bool                    is_maxslow_flow; //是否是slowdown值最大sqid对应的req
+
     /* OC2.0: sector offset relative to slba where reads become invalid */
     uint64_t predef;
 

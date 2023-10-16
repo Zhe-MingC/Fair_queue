@@ -4,7 +4,8 @@
 
 #define MIN_DISCARD_GRANULARITY     (4 * KiB)
 #define ZNS_PAGE_SIZE               (16 * KiB) //ZNS页大小为16KiB，
-#define NVME_DEFAULT_ZONE_SIZE      (64 * MiB) //72 * MiB)，一个ZONE为64MB,就是一个ZONE包含了4*1024个页；
+#define NVME_DEFAULT_ZONE_SIZE      (128 * MiB) //一个ZONE为128MB,就是一个ZONE包含了8*1024个页;
+// 现在每个zone占据4个通道，2个芯片，每个芯片上有一个ZNS_PAGE，每次写512B，也就是1/32个page
 //#define NVME_SECOND_NS_ZONE_SIZE    (64 * MiB)
 #define NVME_DEFAULT_MAX_AZ_SIZE    (128 * KiB) 
 uint64_t lag = 0;
@@ -247,10 +248,6 @@ static void zns_init_zoned_state(NvmeNamespace *ns)
             zone_size = capacity - start;
         }
         zone->d.zt = NVME_ZONE_TYPE_SEQ_WRITE;
-// #if MK_ZONE_CONVENTIONAL
-//         if( (i & (UINT32_MAX << MK_ZONE_CONVENTIONAL)) == 0){
-//             zone->d.zt = NVME_ZONE_TYPE_CONVENTIONAL;}
-// #endif
         zns_set_zone_state(zone, NVME_ZONE_STATE_EMPTY);
         zone->d.za = 0;
         zone->d.zcap = n->zone_capacity;
@@ -499,16 +496,6 @@ static uint16_t zns_check_zone_write(FemuCtrl *n, NvmeNamespace *ns,
         } else if (unlikely(slba != zone->w_ptr)) { // 如果不是append则要从其实地址开始写
             
             status = NVME_ZONE_INVALID_WRITE;   
-// #if MK_ZONE_CONVENTIONAL
-//             if( (zidx < ( 1 << MK_ZONE_CONVENTIONAL)) ){
-//                 //zidx & (UINT32_MAX << 3) == 0 //2^3 convs
-//                 //(zidx == 0) || (zidx == 1) || (zidx == 2) || (zidx == 3)
-//                 //NVME_ZONE_TYPE_CONVENTIONAL;
-//                 zone->w_ptr = slba;
-//                 //zone->w_ptr = zone->d.zslba;
-//                 status = NVME_SUCCESS;
-//             }
-// #endif
         }
     }
     return status;
@@ -1436,23 +1423,6 @@ static void  znsssd_read(ZNS *zns, NvmeRequest *req){
  * @brief 
  * 处理芯片上的transaction队列
 */
-// static void chip_queue_test(ZNS *zns){
-//     struct zns_ssdparams *spp = &zns->sp;
-//     zns_ssd_lun *chip = NULL;
-//     chip_transaction *c_t, *next;   
-    
-//     for(int i = 0; i < spp->nchnls * spp->ways; ++i){
-//         chip = &zns->chips[i];
-//         assert(chip != NULL);
-//         QTAILQ_FOREACH_SAFE(c_t, &chip->chip_list, entry, next){
-//             // c_t指向该事务，
-//             QTAILQ_REMOVE(&chip->chip_list, c_t, entry);
-//             assert(c_t->req != NULL);
-//             c_t->req->transaction_num--; //将req中的num计数-1；表示已经处理了一个事务
-//             femu_log("chip[%d] has transaction from req->stime [%lu]\n\r", i, c_t->req->stime);
-//         }
-//     }
-// }
 static void chip_list_process(ZNS *zns){
     struct zns_ssdparams *spp = &zns->sp;
     zns_ssd_lun *chip = NULL;
@@ -1482,10 +1452,76 @@ static void chip_list_process(ZNS *zns){
             }
             c_t->lat = chip->next_avail_time - cmd_stime;
             c_t->req->maxlat = c_t->req->maxlat > c_t->lat ? c_t->req->maxlat : c_t->lat; //记录最大延迟
+            if(c_t->lat != c_t->req->maxlat)
+                femu_log("slack happens!\n\r");
             if(c_t->req->transaction_num == 0)  //如果所有事务都执行完，记录当前的响应时间
                 c_t->req->expire_time += c_t->req->maxlat;
-            if(c_t->req->transaction_num == 0)
-            femu_log("chip[%d] has transaction from req->stime [%lu] expire_time [%lu]\n\r", i, c_t->req->stime, c_t->req->expire_time);
+            // if(c_t->req->transaction_num == 0)
+            //     femu_log("chip[%d] has transaction from req->stime [%lu] expire_time [%lu]\n\r", i, c_t->req->stime, c_t->req->expire_time);
+            // 需不需要释放？ 需要，否则内存会溢出
+            g_free(ts);
+        }
+    }
+}
+/**
+ * @brief 计算每个事务的单独等待时间; 保证一个chip队列中所有sqid相同的值的slowdown是一样的
+*/
+static void estimate_tr_alone_wait_time(chip_transaction *c_t){
+    zns_ssd_lun *chip = NULL;
+    chip = c_t->chip;
+    assert(chip != NULL);
+    chip_transaction *next;
+    chip_transaction *itr;
+    itr = QTAILQ_PREV(c_t, &chip->chip_list, entry);
+    QTAILQ_FOREACH_REVERSE_SAFE(itr, &chip->chip_list, entry, next){ //从c_t遍历所有的事务，直到队列头或者遍历到与其sqid相同的事务
+        if(itr->req->sq->sqid == c_t->req->sq->sqid)
+            break;
+        itr = QTAILQ_PREV(itr, &chip->chip_list, entry);
+    }
+    if(itr == QTAILQ_FIRST && itr->req->sq->sqid != c_t->req->sq->sqid){ //这意味着c_t之前全是别的sqid的事务,这时能直接算
+
+    }
+    // 否则还是需要根据别的事务来进行计算
+    c_t->estimate_alone_wait_time = 
+}
+/**
+ * @brief 计算不同sq中slowdown值最大的sq的sqid，并将其请求的is_maxslow_flow设置为true
+*/
+static uint16_t cal_max_sd(ZNS* zns){
+    struct zns_ssdparams *spp = &zns->sp;
+    zns_ssd_lun *chip = NULL;
+    // 轮询每个chip，然后再轮询每个chip上的事务；
+    chip_transaction *c_t, *next;
+    uint64_t estimate_alone_wait_time;
+    uint64_t shared_wait_time;
+    for(int i = 0; i < spp->nchnls * spp->ways; ++i){//首先遍历所有chip队列
+        chip = &zns->chips[i];
+        assert(chip != NULL);
+        QTAILQ_FOREACH_SAFE(c_t, &chip->chip_list, entry, next){ //从头到尾遍历该chip队列中的所有元素
+            estimate_alone_wait_time = chip->next_avail_time 
+        }
+    }
+}
+/**
+ * @brief 根据fairzns的方法对每个芯片上的事务进行排序
+ * 
+ * @note 函数关键点为将slowdown值最大的flow在芯片事务中的位置提前
+ * @todo 为了简化模拟fair-zns，函数并未考虑zone的顺序写请求
+*/
+static void slowdown_cal_fairzns(ZNS* zns){
+    struct zns_ssdparams *spp = &zns->sp;
+    zns_ssd_lun *chip = NULL;
+    // 轮询每个chip，然后再轮询每个chip上的事务；
+    chip_transaction *c_t, *next;
+    for(int i = 0; i < spp->nchnls * spp->ways; ++i){//首先遍历所有chip队列
+        chip = &zns->chips[i];
+        assert(chip != NULL);
+        QTAILQ_FOREACH_SAFE(c_t, &chip->chip_list, entry, next){ //遍历该chip队列中的所有元素
+            // c_t指向该事务
+            if(c_t->req->is_maxslow_flow){ //如果它是属于最大slowdown值的flow
+                QTAILQ_REMOVE(&chip->chip_list, c_t, entry);
+                QTAILQ_INSERT_HEAD(&chip->chip_list, c_t, entry); //将该请求插入到队列头
+            }
         }
     }
 }
@@ -1586,6 +1622,7 @@ static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 #endif
     assert(n->zoned);
     req->is_write = false;
+    
 
     status = nvme_check_mdts(n, data_size);
     if (status) {
@@ -1713,7 +1750,7 @@ err:
 static uint16_t zns_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                            NvmeRequest *req)
 {
-
+    req->is_maxslow_flow = false; //先将所有的都设为不是maxslow，然后再advance status中将属于maxslow的设出来
     switch (cmd->opcode) {
     case NVME_CMD_READ:
         // femu_log("ZNS READ cmd->opcode %d %x\n\r",cmd->opcode, cmd->opcode);
@@ -1811,7 +1848,7 @@ static void znsssd_init_params(FemuCtrl * n, struct zns_ssdparams *spp){
     spp->chnls_per_zone = 4;   
     spp->zones          = n->num_zones;     
     spp->ways           = 2;    //default : 2
-    spp->ways_per_zone  = 1;    //default :==spp->ways
+    spp->ways_per_zone  = 2;    //default :==spp->ways
     spp->dies_per_chip  = 1;    //default : 1
     spp->planes_per_die = 4;    //default : 4
     spp->register_model = 1;    
